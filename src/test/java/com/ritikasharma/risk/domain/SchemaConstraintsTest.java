@@ -35,7 +35,8 @@ class SchemaConstraintsTest {
                 Arguments.of("ck_risk_rules_signal_type", SignalType.class),
                 Arguments.of("ck_watchlist_entries_entity_type", WatchlistEntityType.class),
                 Arguments.of("ck_country_risk_level", CountryRiskLevel.class),
-                Arguments.of("ck_outbox_events_status", OutboxStatus.class));
+                Arguments.of("ck_outbox_events_status", OutboxStatus.class),
+                Arguments.of("ck_user_roles_role", Role.class));
     }
 
     @ParameterizedTest(name = "{0} allows exactly the constants of {1}")
