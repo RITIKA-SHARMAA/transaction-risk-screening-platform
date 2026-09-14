@@ -50,6 +50,8 @@ Docker API 1.32, which Docker Engine 29+ rejects. With Colima, export
 The Kafka test container is `org.testcontainers.containers.KafkaContainer` (Confluent image, KRaft)
 because Boot 3.3's `@ServiceConnection` does not recognise the `apache/kafka` container class.
 
+**Kafka images differ by context:** tests use the Confluent image (`confluentinc/cp-kafka`, required by Boot 3.3 test autoconfiguration) while docker-compose uses `apache/kafka`; both run in KRaft mode.
+
 ## Configuration
 
 - `src/main/resources/application.yml` holds a base section plus `local` and `test` profile documents.
