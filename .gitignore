@@ -1,0 +1,33 @@
+# Build
+target/
+!.mvn/wrapper/maven-wrapper.jar
+*.class
+*.log
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+.apt_generated/
+bin/
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+application-secrets.yml
+*.pem
+*.key
+*.p12
+*.jks
