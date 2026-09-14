@@ -5,9 +5,11 @@ The diagram version of the flow lives in [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 
 ## Status
 
-Phase 1 (skeleton) is done: build, packages, configuration, Docker, actuator. **No business logic,
-entities, migrations, listeners or endpoints exist yet.** Everything below the "Architecture" heading
-describes the target design that later phases must implement, not code that is already there.
+- **Phase 1 (skeleton), done:** build, packages, configuration, Docker, actuator.
+- **Phase 2 (persistence), done:** Flyway schema and seed data, JPA entities, enums and repositories in
+  `domain`, repository tests against Testcontainers PostgreSQL. See "Persistence" below.
+- **Not built yet:** REST endpoints, services, Kafka producers/listeners, outbox relay, rule evaluation,
+  correlation id filter, problem-detail advice. The "Architecture" section describes that target design.
 
 ## Stack
 
@@ -63,18 +65,79 @@ because Boot 3.3's `@ServiceConnection` does not recognise the `apache/kafka` co
 - Actuator exposes `health`, `info`, `prometheus`. Health and prometheus are unauthenticated;
   everything else requires authentication (API auth mechanism not yet chosen, unauthenticated calls get 401).
 
+## Persistence
+
+Schema lives in `src/main/resources/db/migration`: V1-V4 create tables, V5-V7 seed data.
+
+| Table | Purpose | Key constraints and indexes |
+|-------|---------|-----------------------------|
+| `transactions` | Submitted payments, `status` PENDING until decided | `(merchant_id, created_at)`, `(payer_account_id, created_at)` for velocity; `@Version` |
+| `idempotency_records` | Request idempotency, replayable response | **unique `(idempotency_key, merchant_id)`**; `expires_at` for the sweep; `@Version` |
+| `screening_signals` / `risk_signals` | One signal of each kind per transaction | unique `transaction_id`, unique `event_id` |
+| `decisions` | One decision per transaction (`TransactionDecision` entity) | unique `transaction_id`; `(decision, decided_at)` review queue |
+| `risk_rules` | Rules, weights, thresholds, JSON `params`, decision cut-offs | unique `code`; cut-off rows have `decision` + `threshold` and no `signal_type` (check constraint) |
+| `watchlist_entries` | Screening list (seeded list is synthetic) | unique `(list_source, source_reference)`; partial index on `normalized_name` where active |
+| `country_risk` | Country risk level and score (seeded values are illustrative) | PK `country_code` |
+| `outbox_events` | Transactional outbox with claim protocol | partial indexes for due `PENDING` rows and `CLAIMED` rows |
+| `processed_events` | Consumer idempotency | **unique `(consumer_group, event_id)`**; `processed_at` for the sweep |
+
+Rules for schema and entity changes:
+
+- Enum-backed columns are `VARCHAR` + `CHECK`. Adding an enum constant needs a migration that replaces the
+  constraint; `SchemaConstraintsTest` fails if an enum and its constraint drift apart.
+- Every table has `created_at`/`updated_at TIMESTAMPTZ NOT NULL`. Entities get them from `AuditedEntity`
+  (Hibernate timestamps); native `UPDATE`s must set `updated_at` themselves.
+- **Entities reference each other by id (UUID/Long columns with DB foreign keys), never with JPA
+  associations.** Lombok on entities is limited to `@Getter` and a protected `@NoArgsConstructor`; if an
+  association is ever introduced, that entity loses Lombok (see Conventions).
+- Application-assigned UUID ids extend `AssignedIdEntity` (`Persistable`, so `save()` inserts without a
+  select). Reference data entities (`RiskRule`, `WatchlistEntry`, `CountryRisk`) are `@Immutable`: change
+  them with migrations.
+- `watchlist_entries.normalized_name` must equal `NameNormalizer.normalize(full_name)`; `SeedDataTest`
+  checks this for every seeded row.
+- Money is `NUMERIC(19,4)`; amount rules are per currency (no FX conversion).
+
+### Outbox claim protocol
+
+`OutboxEventRepository` implements it; the SQL is documented in V4.
+
+1. `claimBatch(owner, now, staleBefore, batchSize)` in its own short transaction: atomically moves due
+   `PENDING` rows (and `CLAIMED` rows whose `claimed_at` is older than the claim timeout) to `CLAIMED`, sets
+   `claimed_by`/`claimed_at`, increments `attempts`. `FOR UPDATE SKIP LOCKED` guarantees concurrent relays
+   get disjoint rows (`OutboxClaimConcurrencyTest`).
+2. Publish to Kafka outside any database transaction.
+3. Report with `markPublished`, `markForRetry` (back to `PENDING` with a later `next_attempt_at`) or
+   `markFailed`. All three require `status = CLAIMED AND claimed_by = owner` and return rows updated, so a
+   relay whose claim went stale and was taken over gets 0 and must not act further.
+
+Reclaiming stale claims means a relay that crashed after sending but before `markPublished` causes a
+re-publish: delivery is at-least-once and `txn.decided` consumers dedupe by event id (the outbox row id).
+
+### Consumer idempotency
+
+Call `ProcessedEventRepository.markProcessed(group, eventId, topic, now)` first inside the consumer's
+transaction. It uses `INSERT ... ON CONFLICT DO NOTHING` and returns 0 for a duplicate, so skip the side
+effects when it does; it never throws on duplicates and does not poison the transaction.
+
+### Repository tests
+
+Annotate with `@RepositoryTest` (`@DataJpaTest` + real PostgreSQL via `PostgresTestcontainersConfiguration`,
+all migrations and seeds applied, one shared container). Tests roll back by default; tests that need real
+commits (concurrency) use `@Transactional(propagation = NOT_SUPPORTED)` and clean up after themselves.
+Seed data is shared by all tests, so never modify seeded rows in a committing test.
+
 ## Package layout (`com.ritikasharma.risk`)
 
 | Package     | Responsibility |
 |-------------|----------------|
 | `api`       | REST controllers, request/response DTOs, Idempotency-Key handling |
-| `domain`    | Entities, repositories, domain types (Transaction, Decision, ...) |
+| `domain`    | Entities, repositories, enums (see Persistence) |
 | `screening` | Screening worker: consumes `txn.submitted`, emits `txn.screening-signal` |
 | `risk`      | Risk worker: consumes `txn.submitted`, evaluates DB-driven rules, emits `txn.risk-signal` |
 | `decision`  | Decision engine: joins both signals, decides APPROVE / REVIEW / BLOCK, writes outbox |
 | `messaging` | Topic names (`Topics`), producers, outbox relay, processed-event store, retry/DLT wiring |
 | `config`    | Spring configuration (security, Kafka topics and error handlers, Redis, observability) |
-| `common`    | Correlation id, RFC 7807 problem details, shared utilities |
+| `common`    | Correlation id, RFC 7807 problem details, shared utilities (`NameNormalizer`) |
 
 ## Architecture
 
@@ -146,7 +209,9 @@ These are requirements, not suggestions. Do not ship a feature that violates one
 - **Flyway for every schema change.** Migrations go in `src/main/resources/db/migration` as
   `V<n>__<description>.sql`. Never edit an applied migration; add a new one. Hibernate only validates.
 - **No Lombok on JPA entities that take part in relationships.** Generated `equals`/`hashCode`/`toString`
-  on associations cause lazy-loading and recursion bugs. Write those entities by hand.
+  on associations cause lazy-loading and recursion bugs. Write those entities by hand. Current entities have
+  no associations and use only `@Getter` + protected `@NoArgsConstructor`; never `@Data`, `@EqualsAndHashCode`
+  or `@ToString` on an entity.
 - Kafka messages are keyed by transaction id.
 - Store money as `BigDecimal` / `NUMERIC` with an ISO 4217 currency code, and timestamps as `Instant` / `TIMESTAMPTZ` in UTC.
 - Integration tests use Testcontainers via `TestcontainersConfiguration`, not mocks of Kafka or Postgres.
