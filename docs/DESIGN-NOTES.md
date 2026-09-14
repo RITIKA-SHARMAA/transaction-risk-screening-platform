@@ -7,6 +7,12 @@ The diagram version of the flow lives in [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 
 Nine build phases, numbered 0-8. Keep this list, the README's "Implementation status" table and the code in agreement.
 
+**Every phase must update the relevant README.md sections as part of that phase's own work, in the same
+commits:** at least the Implementation status row, plus Tech stack, Getting started (new environment variables),
+Data model, API reference, Testing, Design decisions and Limitations wherever the phase changes them. The README
+describes only what the code does; anything unbuilt stays under Planned, and it must never contain metrics,
+benchmarks, throughput or accuracy figures, user counts or production-usage claims.
+
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 0 | Skeleton: build, packages, configuration, Docker, actuator | Done |
