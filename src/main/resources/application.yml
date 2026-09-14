@@ -4,11 +4,12 @@
 spring:
   application:
     name: payment-risk-screening-platform
-  profiles:
-    active: ${SPRING_PROFILES_ACTIVE:local}
+  # No default profile. The packaged jar/image runs the base configuration unless SPRING_PROFILES_ACTIVE is
+  # set, so dev defaults and the db/seed-dev demo users can't be activated by omission. `./mvnw spring-boot:run`
+  # activates "local" through the Maven plugin; docker-compose sets it explicitly.
 
   autoconfigure:
-    # No in-memory user with a generated password; API auth is added in a later phase.
+    # No in-memory user with a generated password; users come from the app_users table.
     exclude: org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
 
   datasource:
@@ -60,6 +61,12 @@ server:
   shutdown: graceful
 
 risk:
+  security:
+    jwt:
+      # No default in any profile: set JWT_SECRET (at least 32 bytes), or startup fails.
+      secret: ${JWT_SECRET}
+      issuer: ${JWT_ISSUER:payment-risk-screening-platform}
+      access-token-ttl: ${JWT_ACCESS_TOKEN_TTL:PT15M}
   kafka:
     topics:
       partitions: ${KAFKA_TOPIC_PARTITIONS:3}

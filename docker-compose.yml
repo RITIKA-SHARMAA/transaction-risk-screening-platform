@@ -1,5 +1,6 @@
-# Local development stack. Credentials below are throwaway defaults for this compose
+# Local development stack. Database credentials below are throwaway defaults for this compose
 # network only; override any of them via environment variables or a git-ignored .env file.
+# JWT_SECRET has no default and must be provided (see .env.example).
 
 name: payment-risk-screening
 
@@ -77,6 +78,9 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # Required, no default: at least 32 bytes. Put it in a git-ignored .env file (see .env.example).
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is not set. Copy .env.example to .env and set it, e.g. with openssl rand -base64 48}
+      JWT_ACCESS_TOKEN_TTL: ${JWT_ACCESS_TOKEN_TTL:-PT15M}
       JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75}
     ports:
       - "${APP_HOST_PORT:-8080}:8080"

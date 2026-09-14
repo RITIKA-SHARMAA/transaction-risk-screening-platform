@@ -5,11 +5,23 @@ The diagram version of the flow lives in [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 
 ## Status
 
-- **Phase 1 (skeleton), done:** build, packages, configuration, Docker, actuator.
-- **Phase 2 (persistence), done:** Flyway schema and seed data, JPA entities, enums and repositories in
-  `domain`, repository tests against Testcontainers PostgreSQL. See "Persistence" below.
-- **Not built yet:** REST endpoints, services, Kafka producers/listeners, outbox relay, rule evaluation,
-  correlation id filter, problem-detail advice. The "Architecture" section describes that target design.
+Nine build phases, numbered 0-8. Keep this list, the README's "Implementation status" table and the code in agreement.
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 0 | Skeleton: build, packages, configuration, Docker, actuator | Done |
+| 1 | Persistence: Flyway schema and seed data, entities, repositories, repository tests | Done |
+| 2 | Authentication: JWT login, MERCHANT/REVIEWER roles, RFC 7807 401/403 | Done |
+| 3 | Transaction API: submit/get, Idempotency-Key, correlation id, problem-detail mapping, publish `txn.submitted` | Planned |
+| 4 | Screening worker: watchlist screening, `txn.screening-signal`, consumer idempotency, retry + DLT | Planned |
+| 5 | Risk worker: DB-driven rule evaluation, `txn.risk-signal` | Planned |
+| 6 | Decision engine and outbox relay: decisions, `txn.decided` via the claim protocol | Planned |
+| 7 | Review workflow: REVIEWER endpoints for the manual review queue | Planned |
+| 8 | Operational hardening: custom metrics, tracing, DLT inspection, CI | Planned |
+
+Nothing from phases 3-8 exists yet: no transaction or review endpoints, services, Kafka producers or
+listeners, outbox relay, rule evaluation or correlation id filter. The "Architecture" section describes
+that target design.
 
 ## Stack
 
@@ -24,6 +36,7 @@ The diagram version of the flow lives in [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 ## Running
 
 ```bash
+cp .env.example .env               # then set JWT_SECRET, e.g. openssl rand -base64 48
 docker compose up --build          # postgres, redis, kafka and the app
 curl localhost:8080/actuator/health
 curl localhost:8080/actuator/prometheus
@@ -33,12 +46,14 @@ Run the app from the IDE/host against the compose infrastructure instead:
 
 ```bash
 docker compose up -d postgres redis kafka
-./mvnw spring-boot:run             # profile "local" is the default
+JWT_SECRET=... ./mvnw spring-boot:run   # the Maven plugin activates the "local" profile
 ```
 
 Host ports: app 8080, Postgres **5433** (avoids clashing with a local Postgres on 5432), Redis 6379,
 Kafka 9094 (EXTERNAL listener). Inside the compose network Kafka is `kafka:9092`. All host ports are
 overridable (`POSTGRES_HOST_PORT`, `REDIS_HOST_PORT`, `KAFKA_HOST_PORT`, `APP_HOST_PORT`).
+docker-compose interpolates `JWT_SECRET` with `:?`, so **every** compose command (including `exec`, `logs`,
+`down`) fails without it; keep it in `.env` rather than exporting it per shell.
 
 Tests need a Docker daemon (Testcontainers):
 
@@ -57,17 +72,23 @@ because Boot 3.3's `@ServiceConnection` does not recognise the `apache/kafka` co
 ## Configuration
 
 - `src/main/resources/application.yml` holds a base section plus `local` and `test` profile documents.
+- **There is no default active profile.** The jar and Docker image run the base configuration unless
+  `SPRING_PROFILES_ACTIVE` is set; `spring-boot:run` uses `local` via the Maven plugin; compose sets `local`.
 - Every value is read through `${ENV_VAR:default}`. The base section has **no defaults for credentials
   or hosts** (`DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `REDIS_HOST`, `KAFKA_BOOTSTRAP_SERVERS`); only
   the `local` profile supplies throwaway values matching docker-compose.
 - The `test` profile gets connection details from Testcontainers `@ServiceConnection`.
 - Never commit real secrets. `.env` files are git-ignored.
-- Actuator exposes `health`, `info`, `prometheus`. Health and prometheus are unauthenticated;
-  everything else requires authentication (API auth mechanism not yet chosen, unauthenticated calls get 401).
+- `JWT_SECRET` has **no default in any profile or file** (tests use a random per-context value from
+  `src/test/resources/application-test.yml`). Startup fails if it is unset or shorter than 32 bytes.
+- Flyway locations: base `classpath:db/migration`; `local` and `test` add `classpath:db/seed-dev` (demo users).
+- Actuator exposes `health`, `info`, `prometheus`. Health and prometheus are unauthenticated (see Security).
 
 ## Persistence
 
-Schema lives in `src/main/resources/db/migration`: V1-V4 create tables, V5-V7 seed data.
+Schema lives in `src/main/resources/db/migration`: V1-V4 create tables, V5-V7 seed reference data, V8 creates
+users. Dev-only data lives in `src/main/resources/db/seed-dev` (V8_1 demo users); use `V<n>_<m>` versions there
+so they never take a number the main migrations need.
 
 | Table | Purpose | Key constraints and indexes |
 |-------|---------|-----------------------------|
@@ -126,18 +147,41 @@ all migrations and seeds applied, one shared container). Tests roll back by defa
 commits (concurrency) use `@Transactional(propagation = NOT_SUPPORTED)` and clean up after themselves.
 Seed data is shared by all tests, so never modify seeded rows in a committing test.
 
+## Security
+
+- Stateless `SecurityFilterChain` (`config/SecurityConfig`), OAuth2 resource server with HS256 JWTs signed
+  and verified with `JWT_SECRET` (`config/JwtConfig`). No sessions, CSRF, form login or HTTP basic.
+- `POST /api/v1/auth/login` (`api/AuthController` -> `security/LoginService`) checks the BCrypt hash via a
+  `DaoAuthenticationProvider` and returns `{accessToken, tokenType, expiresIn, expiresAt, roles}` with
+  `Cache-Control: no-store`. `GET /api/v1/auth/me` echoes the caller's claims.
+- Token claims: `sub` = username, `iss`, `iat`, `exp`, `jti`, `roles` (e.g. `["MERCHANT"]`), `merchant_id`
+  for merchant users. The decoder requires our issuer, HS256, a valid signature and a present, unexpired `exp`
+  (60 s clock skew). TTL is `JWT_ACCESS_TOKEN_TTL` (default 15 minutes). There are no refresh tokens.
+- Roles: `MERCHANT`, `REVIEWER` (`domain/Role`, `user_roles` table). The `roles` claim becomes `ROLE_*`
+  authorities. Route rules: `/api/v1/transactions/**` MERCHANT, `/api/v1/reviews/**` REVIEWER, login and
+  health/prometheus public, everything else authenticated. Add new routes to these rules, not ad hoc.
+- Errors are RFC 7807: 401 (missing/invalid/expired token, or failed login) and 403 (wrong role) come from
+  `security/ProblemDetailsAuthenticationEntryPoint` and `ProblemDetailsAccessDeniedHandler`, which keep the
+  RFC 6750 `WWW-Authenticate` header; controller errors go through `common/ApiExceptionHandler`.
+- Failed logins return the same body for unknown users and wrong passwords.
+- Users: `app_users` + `user_roles` (V8). Usernames are lower case (login lower-cases input). Demo users
+  exist only where `db/seed-dev` is loaded: `merchant.demo` / `merchant-dev-password` (merchant
+  `merchant-demo`) and `reviewer.demo` / `reviewer-dev-password`. There is no user management API yet.
+- Integration tests use `@IntegrationTest` (full app, MockMvc, shared Testcontainers context).
+
 ## Package layout (`com.ritikasharma.risk`)
 
 | Package     | Responsibility |
 |-------------|----------------|
-| `api`       | REST controllers, request/response DTOs, Idempotency-Key handling |
+| `api`       | REST controllers and request/response DTOs (auth today; Idempotency-Key handling in phase 3) |
 | `domain`    | Entities, repositories, enums (see Persistence) |
 | `screening` | Screening worker: consumes `txn.submitted`, emits `txn.screening-signal` |
 | `risk`      | Risk worker: consumes `txn.submitted`, evaluates DB-driven rules, emits `txn.risk-signal` |
 | `decision`  | Decision engine: joins both signals, decides APPROVE / REVIEW / BLOCK, writes outbox |
 | `messaging` | Topic names (`Topics`), producers, outbox relay, processed-event store, retry/DLT wiring |
-| `config`    | Spring configuration (security, Kafka topics and error handlers, Redis, observability) |
-| `common`    | Correlation id, RFC 7807 problem details, shared utilities (`NameNormalizer`) |
+| `security`  | JWT login, user details, 401/403 problem-detail handlers |
+| `config`    | Spring configuration (security filter chain, JWT encoder/decoder, clock, Kafka topics) |
+| `common`    | RFC 7807 problem details (`ApiExceptionHandler`, `ProblemDetails`), shared utilities (`NameNormalizer`), later the correlation id |
 
 ## Architecture
 
