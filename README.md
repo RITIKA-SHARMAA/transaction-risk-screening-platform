@@ -176,7 +176,7 @@ Redis is connected and reported in the health endpoint, but no application code 
 ### Run everything with docker compose
 
 ```bash
-git clone https://github.com/RITIKA-SHARMAA/payment-risk-screening-platform.git
+git clone https://github.com/RITIKA-SHARMAA/transaction-risk-screening-platform.git
 cd payment-risk-screening-platform
 
 cp .env.example .env
