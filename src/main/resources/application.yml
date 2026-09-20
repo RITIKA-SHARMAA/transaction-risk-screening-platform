@@ -1,0 +1,140 @@
+# Every value is overridable by environment variable. Credentials have no defaults here;
+# the local profile supplies throwaway values that only work against docker-compose.
+
+spring:
+  application:
+    name: payment-risk-screening-platform
+  # No default profile. The packaged jar/image runs the base configuration unless SPRING_PROFILES_ACTIVE is
+  # set, so dev defaults and the db/seed-dev demo users can't be activated by omission. `./mvnw spring-boot:run`
+  # activates "local" through the Maven plugin; docker-compose sets it explicitly.
+
+  autoconfigure:
+    # No in-memory user with a generated password; users come from the app_users table.
+    exclude: org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate  # schema is owned by Flyway
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    # Schema and reference data only. Dev users (db/seed-dev) are added by the local and test profiles.
+    locations: ${FLYWAY_LOCATIONS:classpath:db/migration}
+
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:payment-risk-screening}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      ack-mode: record
+
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+risk:
+  security:
+    jwt:
+      # No default in any profile: set JWT_SECRET (at least 32 bytes), or startup fails.
+      secret: ${JWT_SECRET}
+      issuer: ${JWT_ISSUER:payment-risk-screening-platform}
+      access-token-ttl: ${JWT_ACCESS_TOKEN_TTL:PT15M}
+  kafka:
+    topics:
+      partitions: ${KAFKA_TOPIC_PARTITIONS:3}
+      replicas: ${KAFKA_TOPIC_REPLICAS:1}
+  outbox:
+    poll-delay: ${RISK_OUTBOX_POLL_DELAY:1000}
+    batch-size: ${RISK_OUTBOX_BATCH_SIZE:50}
+    max-attempts: ${RISK_OUTBOX_MAX_ATTEMPTS:8}
+    stale-after: ${RISK_OUTBOX_STALE_AFTER:PT2M}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: ${MANAGEMENT_ENDPOINTS:health,info,prometheus}
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: ${MANAGEMENT_HEALTH_SHOW_DETAILS:never}
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    com.ritikasharma.risk: ${LOG_LEVEL_APP:INFO}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/risk}
+    username: ${DB_USERNAME:risk}
+    password: ${DB_PASSWORD:risk_local_only}
+  flyway:
+    locations: ${FLYWAY_LOCATIONS:classpath:db/migration,classpath:db/seed-dev}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+
+management:
+  endpoint:
+    health:
+      show-details: ${MANAGEMENT_HEALTH_SHOW_DETAILS:always}
+
+logging:
+  level:
+    com.ritikasharma.risk: ${LOG_LEVEL_APP:DEBUG}
+
+---
+# Connection details come from Testcontainers via @ServiceConnection.
+spring:
+  config:
+    activate:
+      on-profile: test
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed-dev
+  kafka:
+    consumer:
+      group-id: payment-risk-screening-test
+
+risk:
+  kafka:
+    topics:
+      partitions: 1
+

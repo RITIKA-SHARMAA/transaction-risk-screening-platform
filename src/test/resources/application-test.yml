@@ -1,0 +1,6 @@
+# Test-only overrides loaded after application.yml. The JWT secret is random per test context rather
+# than a committed value; tests that mint tokens use the context's JwtEncoder or JwtProperties.
+risk:
+  security:
+    jwt:
+      secret: ${random.uuid}${random.uuid}
