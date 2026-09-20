@@ -1,17 +1,17 @@
 # payment-risk-screening-platform
 
-A Spring Boot service for screening payment transactions before they are accepted. The target design sends
+A Spring Boot service for screening payment transactions before they are accepted. Each submitted payment is sent
 each submitted payment through two independent checks in parallel: a **screening** check of the payer and
 payee names against a watchlist, and a **risk** score built from configurable rules (amount, payer velocity,
-country risk, cross-border). A decision engine will then combine both results into **APPROVE**, **REVIEW**
+country risk, cross-border). A decision engine then combines both results into **APPROVE**, **REVIEW**
 (held for a human reviewer) or **BLOCK**, and publish that decision for downstream systems. The service is
 meant to make this decision reliably and auditably: no transaction decided twice, no decision lost, rules
 changed through data migrations rather than code changes, and every event traceable back to the HTTP request
 that caused it.
 
-The service is being built in phases. **Today** it has the build and runtime skeleton, the complete database
-schema and data-access layer, and JWT authentication. The transaction pipeline itself (API, workers,
-decision engine, outbox relay) is **planned**. See [Implementation status](#implementation-status).
+The service is implemented in phases. The transaction API, parallel screening and risk workers, decision
+engine, transactional outbox relay, reviewer workflow and operational hardening are included. See
+[Implementation status](#implementation-status).
 
 ## Contents
 
@@ -27,7 +27,7 @@ decision engine, outbox relay) is **planned**. See [Implementation status](#impl
 
 ## Architecture
 
-The diagram shows the **target design**. The parts marked Planned in the status table are not built yet.
+The diagram shows the implemented event-driven design.
 A sequence diagram of the same flow is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```mermaid
@@ -76,28 +76,27 @@ flowchart LR
     decision -.->|retries exhausted| dlt
 ```
 
-Planned flow:
+Implemented flow:
 
 1. A merchant submits a transaction over REST with an `Idempotency-Key` header.
-2. The transaction service will store it as `PENDING` and publish `txn.submitted`.
-3. The screening worker and the risk worker will each consume `txn.submitted` in their own consumer group, in
-   parallel, and each publish one signal.
-4. The decision engine will wait for both signals, decide, and write the decision and an outbox row in one
+2. The transaction service stores it as `PENDING` and enqueues `txn.submitted`.
+3. The screening worker and the risk worker each consume `txn.submitted` in their own consumer group, in parallel, and enqueue one signal.
+4. The decision engine waits for both signals, decides, and writes the decision and an outbox row in one
    database transaction.
-5. An outbox relay will publish the decision to `txn.decided`.
-6. Events that still fail after retries with exponential backoff will go to the matching dead-letter topic.
+5. The outbox relay publishes the decision to `txn.decided`.
+6. Consumer failures are retried with exponential backoff and then sent to the matching dead-letter topic.
 
 ### Topics
 
-All eight topics are declared in `config/KafkaTopicConfig` and created when the application starts. No
-producers or consumers use them yet.
+All eight topics are declared in `config/KafkaTopicConfig` and created when the application starts. The
+application uses the four main topics and their matching DLTs.
 
-| Topic | Planned producer | Planned consumers | Record key |
+| Topic | Producer | Consumers | Record key |
 |-------|------------------|-------------------|------------|
-| `txn.submitted` | Transaction service | Screening worker, risk worker | transaction id |
-| `txn.screening-signal` | Screening worker | Decision engine | transaction id |
-| `txn.risk-signal` | Risk worker | Decision engine | transaction id |
-| `txn.decided` | Outbox relay | Downstream systems | transaction id |
+| `txn.submitted` | Transaction service via outbox relay | Screening worker, risk worker | transaction id |
+| `txn.screening-signal` | Screening worker via outbox relay | Decision engine | transaction id |
+| `txn.risk-signal` | Risk worker via outbox relay | Decision engine | transaction id |
+| `txn.decided` | Decision engine/review service via outbox relay | Downstream systems | transaction id |
 | `txn.submitted.DLT`, `txn.screening-signal.DLT`, `txn.risk-signal.DLT`, `txn.decided.DLT` | Dead-letter publishing for the topic above | Operators | original key |
 
 Every event for one transaction uses the transaction id as its key, so all of them land on the same partition.
@@ -106,10 +105,10 @@ Every event for one transaction uses the transaction id as its key, so all of th
 
 Screening and risk scoring are independent checks. They depend on different data, can be slow, and can
 fail for different reasons. In a synchronous design, the API call would have to wait for both, would fail
-when either failed, and would couple the merchant's request latency to the slowest check. In the planned
+when either failed, and would couple the merchant's request latency to the slowest check. In the implemented
 event-driven design:
-- The API will only need to store the transaction and hand it off to Kafka.
-- The two workers will run and scale separately.
+- The API stores the transaction and hands it off asynchronously through the transactional outbox.
+- The two workers run and scale separately.
 - A failing check can be retried or dead-lettered without losing the transaction.
 - The decision will be recorded durably and published through the outbox.
 
@@ -124,12 +123,12 @@ exist.
 | 0 | Skeleton: Maven build, package layout, profile configuration, Dockerfile, docker-compose, actuator health and Prometheus | Done |
 | 1 | Persistence: Flyway schema and seed data, JPA entities, repositories, outbox claim queries, repository tests | Done |
 | 2 | Authentication: JWT login, MERCHANT and REVIEWER roles, RFC 7807 401/403 responses | Done |
-| 3 | Transaction API: submit and fetch transactions, `Idempotency-Key` handling, correlation id propagation, problem-detail error mapping, publishing `txn.submitted` | Planned |
-| 4 | Screening worker: watchlist screening, `txn.screening-signal`, consumer idempotency, retry with backoff and dead-letter topics | Planned |
-| 5 | Risk worker: rule evaluation from `risk_rules`, `txn.risk-signal` | Planned |
-| 6 | Decision engine and outbox relay: combining signals, decisions, publishing `txn.decided` | Planned |
-| 7 | Review workflow: REVIEWER endpoints for the manual review queue | Planned |
-| 8 | Operational hardening: application metrics, tracing, dead-letter inspection, CI | Planned |
+| 3 | Transaction API: submit and fetch transactions, `Idempotency-Key` handling, correlation id propagation, problem-detail error mapping, publishing `txn.submitted` | Done |
+| 4 | Screening worker: watchlist screening, `txn.screening-signal`, consumer idempotency, retry with backoff and dead-letter topics | Done |
+| 5 | Risk worker: rule evaluation from `risk_rules`, `txn.risk-signal` | Done |
+| 6 | Decision engine and outbox relay: combining signals, decisions, publishing `txn.decided` | Done |
+| 7 | Review workflow: REVIEWER endpoints for the manual review queue | Done |
+| 8 | Operational hardening: application metrics, correlation propagation, dead-letter handling, CI | Done |
 
 ## Tech stack
 
@@ -264,6 +263,10 @@ Application (`src/main/resources/application.yml`):
 | `MANAGEMENT_ENDPOINTS` | No | `health,info,prometheus` | Actuator endpoints exposed over HTTP |
 | `MANAGEMENT_HEALTH_SHOW_DETAILS` | No | `never` (`always` in `local`) | Health component details |
 | `LOG_LEVEL_APP` | No | `INFO` (`DEBUG` in `local`) | Log level for `com.ritikasharma.risk` |
+| `RISK_OUTBOX_POLL_DELAY` | No | `1000` | Outbox relay polling delay in milliseconds |
+| `RISK_OUTBOX_BATCH_SIZE` | No | `50` | Maximum outbox rows claimed per poll |
+| `RISK_OUTBOX_MAX_ATTEMPTS` | No | `8` | Maximum outbox publish attempts before FAILED |
+| `RISK_OUTBOX_STALE_AFTER` | No | `PT2M` | Age after which a claimed outbox row may be reclaimed |
 
 docker-compose only (`docker-compose.yml`, usually set in `.env`):
 
@@ -295,6 +298,7 @@ constraint drift apart.
 | `country_risk` | Risk level (`LOW`, `MEDIUM`, `HIGH`, `PROHIBITED`) and score (0–100) per ISO country code. |
 | `outbox_events` | Events waiting to be published to Kafka, with the claim columns described below. |
 | `processed_events` | Which consumer group has already processed which event id (unique on `(consumer_group, event_id)`). |
+| `review_actions` | One manual-review completion per transaction, including reviewer, APPROVE/BLOCK outcome, comment and timestamp. |
 
 Authentication adds `app_users` (username, BCrypt password hash, optional merchant id, enabled flag) and
 `user_roles` (MERCHANT or REVIEWER per user).
@@ -306,7 +310,7 @@ including two decision cut-offs (REVIEW at a score of 40, BLOCK at 75) and one r
 
 Several relay instances may poll the same outbox table, so a plain "published" flag isn't enough: two
 instances could read the same unpublished row and both send it. Instead, a relay **claims** rows.
-`OutboxEventRepository` implements the protocol and tests cover it; the relay that will call it is planned
+`OutboxEventRepository` implements the protocol and the relay calls it continuously
 for phase 6.
 
 1. **Claim.** In one short transaction, a single statement selects up to N rows that are `PENDING` and due
@@ -381,6 +385,52 @@ curl -s http://localhost:8080/api/v1/auth/me -H "Authorization: Bearer $TOKEN"
 {"username":"merchant.demo","roles":["MERCHANT"],"merchantId":"merchant-demo","tokenExpiresAt":"2026-01-01T12:15:00Z"}
 ```
 
+### Transactions
+
+#### `POST /api/v1/transactions`
+
+Requires `MERCHANT`. The `Idempotency-Key` header is mandatory. The optional `X-Correlation-Id` header is
+propagated through the event pipeline; one is generated when it is omitted.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/transactions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-001' \
+  -H 'X-Correlation-Id: demo-correlation-001' \
+  -d '{"amount":6000,"currency":"USD","payerAccountId":"acct-100","payerName":"Alice Smith","payerCountry":"US","payeeName":"Bob Smith","payeeCountry":"US"}'
+```
+
+Returns `202 Accepted` with the transaction in `PENDING` state. Reusing the same key with the same request
+replays the original response; reusing it with a different request returns `409 Conflict`.
+
+#### `GET /api/v1/transactions/{id}`
+
+Requires `MERCHANT` and is merchant-scoped. The response includes the current status and, once available,
+the decision, risk score and screening-hit flag.
+
+### Reviews
+
+#### `GET /api/v1/reviews?limit=50`
+
+Requires `REVIEWER`. Returns the oldest open `REVIEW` decisions first.
+
+#### `GET /api/v1/reviews/{transactionId}`
+
+Requires `REVIEWER`. Returns the review item and its current transaction status.
+
+#### `POST /api/v1/reviews/{transactionId}/decision`
+
+Requires `REVIEWER`. Completes an open review with `APPROVE` or `BLOCK`; `REVIEW` is rejected. An optional
+comment is stored in `review_actions`, and the final outcome is emitted to `txn.decided`.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/reviews/$TX_ID/decision \
+  -H "Authorization: Bearer $REVIEWER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"decision":"APPROVE","comment":"Verified by operations"}'
+```
+
 ### Error format
 
 Errors use RFC 7807 problem details with `Content-Type: application/problem+json`:
@@ -404,11 +454,11 @@ Token-related 401 and 403 responses also carry the RFC 6750 `WWW-Authenticate: B
 |-------|--------|
 | `POST /api/v1/auth/login` | Public |
 | `GET /actuator/health`, `GET /actuator/prometheus` | Public |
-| `/api/v1/transactions/**` | MERCHANT role (reserved for phase 3; no endpoints yet) |
-| `/api/v1/reviews/**` | REVIEWER role (reserved for phase 7; no endpoints yet) |
+| `/api/v1/transactions/**` | MERCHANT role |
+| `/api/v1/reviews/**` | REVIEWER role |
 | Everything else | Any valid token |
 
-Transaction endpoints arrive in phase 3 and review endpoints in phase 7. Neither exists yet.
+Transaction endpoints and reviewer endpoints are implemented.
 
 ## Testing
 
@@ -432,6 +482,8 @@ containers**. Nothing is replaced by an in-memory database or a mocked broker.
   - expired, malformed, foreign-key and foreign-issuer tokens
   - a missing token, and a MERCHANT token on a REVIEWER route
 - A random JWT secret is generated for each test context (`src/test/resources/application-test.yml`).
+- Pipeline integration tests should exercise the transaction-to-decision path against the real Kafka and
+  PostgreSQL containers; unit tests cover deterministic rule and API behavior where practical.
 
 With Colima instead of Docker Desktop, export:
 
@@ -454,7 +506,7 @@ container can start. The pin in `pom.xml` overrides the managed version.
 
 **No JPA relationships.** Entities refer to each other by id columns (for example
 `screening_signals.transaction_id`), backed by foreign keys in the database, rather than with `@ManyToOne` or
-`@OneToMany`. The planned workers and decision engine will each load exactly the rows they need, in short
+`@OneToMany`. The workers and decision engine each load exactly the rows they need, in short
 transactions driven by events. Object graphs would add lazy-loading surprises, accidental cascades and
 N+1 queries without helping that access pattern. Because there are no associations, entities can safely use
 a minimal Lombok subset (`@Getter` and a protected no-args constructor) without generated `equals`,
@@ -489,7 +541,6 @@ handling that `risk_rules` already has.
   has to deduplicate by event id.
 - **Single-node local setup.** docker-compose runs one Kafka broker (replication factor 1), one PostgreSQL
   and one Redis, with no high availability. It is for development only.
-- **Most of the pipeline isn't built yet.** Phases 3–8 are planned: there is no transaction API, worker,
-  decision engine, outbox relay or review endpoint.
+- **External sanctions feeds are not integrated.** Watchlist and country-risk data remain synthetic/illustrative.
 - **Authentication is minimal.** HS256 uses one shared secret. There are no refresh tokens, no token
   revocation, and no user management API; users are added through migrations.

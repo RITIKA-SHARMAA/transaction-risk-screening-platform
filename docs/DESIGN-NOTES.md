@@ -18,16 +18,16 @@ benchmarks, throughput or accuracy figures, user counts or production-usage clai
 | 0 | Skeleton: build, packages, configuration, Docker, actuator | Done |
 | 1 | Persistence: Flyway schema and seed data, entities, repositories, repository tests | Done |
 | 2 | Authentication: JWT login, MERCHANT/REVIEWER roles, RFC 7807 401/403 | Done |
-| 3 | Transaction API: submit/get, Idempotency-Key, correlation id, problem-detail mapping, publish `txn.submitted` | Planned |
-| 4 | Screening worker: watchlist screening, `txn.screening-signal`, consumer idempotency, retry + DLT | Planned |
-| 5 | Risk worker: DB-driven rule evaluation, `txn.risk-signal` | Planned |
-| 6 | Decision engine and outbox relay: decisions, `txn.decided` via the claim protocol | Planned |
-| 7 | Review workflow: REVIEWER endpoints for the manual review queue | Planned |
-| 8 | Operational hardening: custom metrics, tracing, DLT inspection, CI | Planned |
+| 3 | Transaction API: submit/get, Idempotency-Key, correlation id, problem-detail mapping, publish `txn.submitted` | Done |
+| 4 | Screening worker: watchlist screening, `txn.screening-signal`, consumer idempotency, retry + DLT | Done |
+| 5 | Risk worker: DB-driven rule evaluation, `txn.risk-signal` | Done |
+| 6 | Decision engine and outbox relay: decisions, `txn.decided` via the claim protocol | Done |
+| 7 | Review workflow: REVIEWER endpoints for the manual review queue | Done |
+| 8 | Operational hardening: custom metrics, tracing, DLT inspection, CI | Done |
 
 Nothing from phases 3-8 exists yet: no transaction or review endpoints, services, Kafka producers or
 listeners, outbox relay, rule evaluation or correlation id filter. The "Architecture" section describes
-that target design.
+that event-driven design.
 
 ## Stack
 

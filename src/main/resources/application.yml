@@ -71,6 +71,11 @@ risk:
     topics:
       partitions: ${KAFKA_TOPIC_PARTITIONS:3}
       replicas: ${KAFKA_TOPIC_REPLICAS:1}
+  outbox:
+    poll-delay: ${RISK_OUTBOX_POLL_DELAY:1000}
+    batch-size: ${RISK_OUTBOX_BATCH_SIZE:50}
+    max-attempts: ${RISK_OUTBOX_MAX_ATTEMPTS:8}
+    stale-after: ${RISK_OUTBOX_STALE_AFTER:PT2M}
 
 management:
   endpoints:
@@ -132,3 +137,4 @@ risk:
   kafka:
     topics:
       partitions: 1
+

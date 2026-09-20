@@ -76,6 +76,16 @@ public class Transaction extends AssignedIdEntity {
         this.status = TransactionStatus.of(decision);
     }
 
+    public void applyReviewDecision(Decision decision) {
+        if (status != TransactionStatus.IN_REVIEW) {
+            throw new IllegalStateException("Transaction " + getId() + " is not awaiting review");
+        }
+        if (decision != Decision.APPROVE && decision != Decision.BLOCK) {
+            throw new IllegalArgumentException("A review must end in APPROVE or BLOCK");
+        }
+        this.status = TransactionStatus.of(decision);
+    }
+
     public void markFailed() {
         requirePending();
         this.status = TransactionStatus.FAILED;
